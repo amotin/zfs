@@ -421,8 +421,11 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
 	spa_t *spa = vq->vq_vdev->vdev_spa;
 	zio_priority_t p, n;
 
-	if (avl_numnodes(&vq->vq_active_tree) >= zfs_vdev_max_active)
+printf("c2i %lu l %u ia_a %u nia_c %u\n", vq->vq_vdev->vdev_id, vq->vq_last_prio, vq->vq_ia_active, vq->vq_nia_credit);
+	if (avl_numnodes(&vq->vq_active_tree) >= zfs_vdev_max_active) {
+printf("c2i %lu ma\n", vq->vq_vdev->vdev_id);
 		return (ZIO_PRIORITY_NUM_QUEUEABLE);
+	}
 
 	/*
 	 * Find a queue that has not reached its minimum # outstanding i/os.
@@ -435,6 +438,7 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
 		    vq->vq_class[p].vqc_active <
 		    vdev_queue_class_min_active(vq, p)) {
 			vq->vq_last_prio = p;
+printf("c2i %lu min %u\n", vq->vq_vdev->vdev_id, p);
 			return (p);
 		}
 	}
@@ -448,11 +452,13 @@ vdev_queue_class_to_issue(vdev_queue_t *vq)
 		    vq->vq_class[p].vqc_active <
 		    vdev_queue_class_max_active(spa, vq, p)) {
 			vq->vq_last_prio = p;
+printf("c2i %lu max %u\n", vq->vq_vdev->vdev_id, p);
 			return (p);
 		}
 	}
 
 	/* No eligible queued i/os */
+printf("c2i %lu none\n", vq->vq_vdev->vdev_id);
 	return (ZIO_PRIORITY_NUM_QUEUEABLE);
 }
 
@@ -524,6 +530,7 @@ vdev_queue_io_add(vdev_queue_t *vq, zio_t *zio)
 	ASSERT3U(zio->io_priority, <, ZIO_PRIORITY_NUM_QUEUEABLE);
 	avl_add(vdev_queue_class_tree(vq, zio->io_priority), zio);
 	avl_add(vdev_queue_type_tree(vq, zio->io_type), zio);
+printf("add %lu %u -> %lu\n", vq->vq_vdev->vdev_id, zio->io_priority, avl_numnodes(vdev_queue_class_tree(vq, zio->io_priority)));
 
 	if (shk->kstat != NULL) {
 		mutex_enter(&shk->lock);
@@ -541,6 +548,7 @@ vdev_queue_io_remove(vdev_queue_t *vq, zio_t *zio)
 	ASSERT3U(zio->io_priority, <, ZIO_PRIORITY_NUM_QUEUEABLE);
 	avl_remove(vdev_queue_class_tree(vq, zio->io_priority), zio);
 	avl_remove(vdev_queue_type_tree(vq, zio->io_type), zio);
+printf("rem %lu %u -> %lu\n", vq->vq_vdev->vdev_id, zio->io_priority, avl_numnodes(vdev_queue_class_tree(vq, zio->io_priority)));
 
 	if (shk->kstat != NULL) {
 		mutex_enter(&shk->lock);
@@ -579,6 +587,7 @@ vdev_queue_pending_add(vdev_queue_t *vq, zio_t *zio)
 		vq->vq_nia_credit--;
 	}
 	avl_add(&vq->vq_active_tree, zio);
+printf("padd %lu %u ia_a %u nia_c %u\n", vq->vq_vdev->vdev_id, zio->io_priority, vq->vq_ia_active, vq->vq_nia_credit);
 
 	if (shk->kstat != NULL) {
 		mutex_enter(&shk->lock);
@@ -604,6 +613,7 @@ vdev_queue_pending_remove(vdev_queue_t *vq, zio_t *zio)
 	} else if (vq->vq_ia_active == 0)
 		vq->vq_nia_credit++;
 	avl_remove(&vq->vq_active_tree, zio);
+printf("prem %lu %u ia_a %u nia_c %u\n", vq->vq_vdev->vdev_id, zio->io_priority, vq->vq_ia_active, vq->vq_nia_credit);
 
 	if (shk->kstat != NULL) {
 		kstat_io_t *ksio = shk->kstat->ks_data;
