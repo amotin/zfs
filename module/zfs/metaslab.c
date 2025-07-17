@@ -5607,6 +5607,14 @@ spa_remap_blkptr(spa_t *spa, blkptr_t *bp, spa_remap_cb_t callback, void *arg)
 		return (B_FALSE);
 
 	/*
+	 * Rewritten blocks can not be remapped, because we have no place
+	 * to store the original physical birth time that's needed for proper
+	 * space accounting after device removal.
+	 */
+	if (BP_GET_REWRITE(bp))
+		return (B_FALSE);
+
+	/*
 	 * Gang blocks can not be remapped, because
 	 * zio_checksum_gang_verifier() depends on the DVA[0] that's in
 	 * the BP used to read the gang block header (GBH) being the same
@@ -5939,7 +5947,7 @@ metaslab_alloc_range(spa_t *spa, metaslab_class_t *mc, uint64_t psize,
 	int error = 0;
 
 	ASSERT0(BP_GET_LOGICAL_BIRTH(bp));
-	ASSERT0(BP_GET_PHYSICAL_BIRTH(bp));
+	ASSERT0(BP_GET_RAW_PHYSICAL_BIRTH(bp));
 
 	spa_config_enter(spa, SCL_ALLOC, FTAG, RW_READER);
 
@@ -6001,7 +6009,7 @@ metaslab_free(spa_t *spa, const blkptr_t *bp, uint64_t txg, boolean_t now)
 	int ndvas = BP_GET_NDVAS(bp);
 
 	ASSERT(!BP_IS_HOLE(bp));
-	ASSERT(!now || BP_GET_LOGICAL_BIRTH(bp) >= spa_syncing_txg(spa));
+	ASSERT(!now || BP_GET_BIRTH(bp) >= spa_syncing_txg(spa));
 
 	/*
 	 * If we have a checkpoint for the pool we need to make sure that
@@ -6019,7 +6027,7 @@ metaslab_free(spa_t *spa, const blkptr_t *bp, uint64_t txg, boolean_t now)
 	 * normally as they will be referenced by the checkpointed uberblock.
 	 */
 	boolean_t checkpoint = B_FALSE;
-	if (BP_GET_LOGICAL_BIRTH(bp) <= spa->spa_checkpoint_txg &&
+	if (BP_GET_BIRTH(bp) <= spa->spa_checkpoint_txg &&
 	    spa_syncing_txg(spa) > spa->spa_checkpoint_txg) {
 		/*
 		 * At this point, if the block is part of the checkpoint

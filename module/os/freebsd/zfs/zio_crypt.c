@@ -58,8 +58,8 @@
  * format supports at most 2^15 slots per L0 dnode block, because the maximum
  * block size is 16MB (2^24). In either case, for level 0 blocks this number
  * will still be smaller than UINT32_MAX so it is safe to store the IV in the
- * top 32 bits of blk_fill, while leaving the bottom 32 bits of the fill count
- * for the dnode code.
+ * top 32 bits of blk_fill, while leaving the bottom 32 bits to the fill count
+ * and other uses.
  *
  * Master key:
  * This is the most important secret data of an encrypted dataset. It is used
