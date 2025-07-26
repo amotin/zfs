@@ -9245,6 +9245,22 @@ spa_async_suspend(spa_t *spa)
 
 	spa_vdev_remove_suspend(spa);
 
+	/*
+	 * ASSERTION 5: Validate device removal state during export/suspend
+	 */
+	if (spa->spa_vdev_removal != NULL) {
+		spa_condensing_indirect_phys_t *scip = &spa->spa_condensing_indirect_phys;
+		if (scip->scip_next_mapping_object != 0) {
+			/*
+			 * CRITICAL: If we have both active removal and condensing,
+			 * verify the state is consistent
+			 */
+			VERIFY3U(scip->scip_vdev, !=, spa->spa_vdev_removal->svr_vdev_id);
+			VERIFY3U(scip->scip_prev_obsolete_sm_object, !=, 0);
+			VERIFY3P(spa->spa_condensing_indirect, !=, NULL);
+		}
+	}
+
 	zthr_t *condense_thread = spa->spa_condense_zthr;
 	if (condense_thread != NULL)
 		zthr_cancel(condense_thread);

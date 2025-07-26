@@ -333,6 +333,28 @@ vdev_indirect_mark_obsolete(vdev_t *vd, uint64_t offset, uint64_t size)
 	    vd->vdev_indirect_mapping, offset) != NULL);
 
 	if (spa_feature_is_enabled(spa, SPA_FEATURE_OBSOLETE_COUNTS)) {
+		/*
+		 * ASSERTION 3: Validate obsolete marking during condensing
+		 */
+		spa_condensing_indirect_phys_t *scip = 
+		    &spa->spa_condensing_indirect_phys;
+		if (scip->scip_vdev == vd->vdev_id && 
+		    scip->scip_next_mapping_object != 0) {
+			/*
+			 * CRITICAL: During condensing, obsolete segments must fit
+			 * within the original mapping bounds
+			 */
+			vdev_indirect_mapping_t *vim = vd->vdev_indirect_mapping;
+			VERIFY3P(vim, !=, NULL);
+			VERIFY3U(offset + size, <=, vd->vdev_asize);
+			
+			/*
+			 * CRITICAL: We must have an entry in the mapping for this offset
+			 * (this is already checked above but adding extra verification)
+			 */
+			VERIFY3P(vdev_indirect_mapping_entry_for_offset(vim, offset), !=, NULL);
+		}
+
 		mutex_enter(&vd->vdev_obsolete_lock);
 		zfs_range_tree_add(vd->vdev_obsolete_segments, offset, size);
 		mutex_exit(&vd->vdev_obsolete_lock);
@@ -607,12 +629,28 @@ spa_condense_indirect_generate_new_mapping(vdev_t *vd,
 	    (u_longlong_t)vd->vdev_id,
 	    (u_longlong_t)mapi);
 
+	/*
+	 * ASSERTION 4: Track mapping entry processing statistics
+	 */
+	uint64_t total_processed_obsolete = 0;
+	uint64_t total_skipped_obsolete = 0;
+	uint64_t entries_processed = 0;
+	uint64_t entries_skipped = 0;
+
 	while (mapi < old_num_entries) {
 
 		if (zthr_iscancelled(zthr)) {
-			zfs_dbgmsg("pausing condense of vdev %llu "
-			    "at index %llu", (u_longlong_t)vd->vdev_id,
-			    (u_longlong_t)mapi);
+			/*
+			 * CRITICAL: Verify we made some progress before cancellation
+			 * If we cancel at the very beginning, that might indicate a timing issue
+			 */
+			VERIFY(mapi > start_index || start_index == 0);
+			
+			/*
+			 * CRITICAL: Verify mapping state is still consistent
+			 */
+			VERIFY3U(old_num_entries, >, 0);
+			VERIFY3U(mapi, <, old_num_entries);
 			break;
 		}
 
@@ -623,6 +661,8 @@ spa_condense_indirect_generate_new_mapping(vdev_t *vd,
 		if (obsolete_counts[mapi] < entry_size) {
 			spa_condense_indirect_commit_entry(spa, entry,
 			    obsolete_counts[mapi]);
+			entries_processed++;
+			total_processed_obsolete += obsolete_counts[mapi];
 
 			/*
 			 * This delay may be requested for testing, debugging,
@@ -632,9 +672,27 @@ spa_condense_indirect_generate_new_mapping(vdev_t *vd,
 			hrtime_t sleep_until = now + MSEC2NSEC(
 			    zfs_condense_indirect_commit_entry_delay_ms);
 			zfs_sleep_until(sleep_until);
+		} else {
+			/*
+			 * Entry being skipped (fully obsolete)
+			 */
+			entries_skipped++;
+			total_skipped_obsolete += obsolete_counts[mapi];
 		}
 
 		mapi++;
+	}
+	
+	/*
+	 * ASSERTION 4b: Validate accounting consistency at end of processing
+	 */
+	if (mapi == old_num_entries) {
+		/*
+		 * CRITICAL: If we completed all entries, verify we processed something
+		 * A completely empty mapping would be suspicious
+		 */
+		VERIFY3U(entries_processed + entries_skipped, >, 0);
+		VERIFY3U(total_processed_obsolete + total_skipped_obsolete, >, 0);
 	}
 }
 
@@ -742,8 +800,25 @@ spa_condense_indirect_thread(void *arg, zthr_t *zthr)
 	 * early. We don't want to complete the condense if the spa is
 	 * shutting down.
 	 */
-	if (zthr_iscancelled(zthr))
+	if (zthr_iscancelled(zthr)) {
+		/*
+		 * ASSERTION 2: Validate state consistency when cancelled
+		 * These conditions MUST hold or we have corrupt state
+		 */
+		spa_condensing_indirect_phys_t *scip_cancel = 
+		    &spa->spa_condensing_indirect_phys;
+		
+		VERIFY3U(scip_cancel->scip_next_mapping_object, !=, 0);
+		VERIFY3U(scip_cancel->scip_prev_obsolete_sm_object, !=, 0);
+		VERIFY3U(scip_cancel->scip_vdev, ==, vd->vdev_id);
+		
+		/*
+		 * CRITICAL: Verify spa condensing indirect structure is consistent
+		 */
+		VERIFY3P(spa->spa_condensing_indirect, !=, NULL);
+		
 		return;
+	}
 
 	VERIFY0(dsl_sync_task(spa_name(spa), NULL,
 	    spa_condense_indirect_complete_sync, sci, 0,
@@ -823,6 +898,30 @@ vdev_indirect_sync_obsolete(vdev_t *vd, dmu_tx_t *tx)
 
 	uint64_t obsolete_sm_object;
 	VERIFY0(vdev_obsolete_sm_object(vd, &obsolete_sm_object));
+
+	/*
+	 * ASSERTION 1: During condensing, ensure we don't create orphaned 
+	 * obsolete space maps
+	 */
+	spa_condensing_indirect_phys_t *scip = &spa->spa_condensing_indirect_phys;
+	if (scip->scip_vdev == vd->vdev_id && scip->scip_next_mapping_object != 0) {
+		/* If we're in condensing state and creating a new obsolete SM */
+		if (obsolete_sm_object == 0 && vd->vdev_obsolete_sm == NULL) {
+			/*
+			 * CRITICAL: Previous obsolete SM must exist during condensing
+			 * or we'll lose obsolete count tracking
+			 */
+			VERIFY3U(scip->scip_prev_obsolete_sm_object, !=, 0);
+			
+			/*
+			 * CRITICAL: We should not be creating multiple new obsolete SMs
+			 * during a single condensing operation
+			 */
+			static boolean_t new_sm_created_during_condensing = B_FALSE;
+			VERIFY(!new_sm_created_during_condensing);
+			new_sm_created_during_condensing = B_TRUE;
+		}
+	}
 	if (obsolete_sm_object == 0) {
 		obsolete_sm_object = space_map_alloc(spa->spa_meta_objset,
 		    zfs_vdev_standard_sm_blksz, tx);
