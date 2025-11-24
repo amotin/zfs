@@ -306,9 +306,13 @@ init_zio_abd(zio_t *zio)
 static void
 fini_raidz_map(zio_t **zio, raidz_map_t **rm)
 {
+	printf("DEBUG: fini_raidz_map called, rm=%p zio=%p\n", *rm, *zio);
 	vdev_raidz_map_free(*rm);
+	printf("DEBUG: after vdev_raidz_map_free\n");
 	raidz_free((*zio)->io_abd, (*zio)->io_size);
+	printf("DEBUG: after raidz_free\n");
 	umem_free(*zio, sizeof (zio_t));
+	printf("DEBUG: after umem_free\n");
 
 	*zio = NULL;
 	*rm = NULL;
