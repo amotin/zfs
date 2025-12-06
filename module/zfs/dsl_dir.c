@@ -1512,25 +1512,26 @@ dsl_dir_tempreserve_clear(void *tr_cookie, dmu_tx_t *tx)
 void
 dsl_dir_willuse_space(dsl_dir_t *dd, int64_t space, dmu_tx_t *tx)
 {
-	int64_t parent_space;
 	uint64_t est_used;
 
 	do {
-		mutex_enter(&dd->dd_lock);
-		if (space > 0)
-			dd->dd_space_towrite[tx->tx_txg & TXG_MASK] += space;
+		if (space != 0) {
+			mutex_enter(&dd->dd_lock);
+			if (space > 0)
+				dd->dd_space_towrite[tx->tx_txg & TXG_MASK] +=
+				    space;
 
-		est_used = dsl_dir_space_towrite(dd) +
-		    dsl_dir_phys(dd)->dd_used_bytes;
-		parent_space = parent_delta(dd, est_used, space);
-		mutex_exit(&dd->dd_lock);
+			est_used = dsl_dir_space_towrite(dd) +
+			    dsl_dir_phys(dd)->dd_used_bytes;
+			space = parent_delta(dd, est_used, space);
+			mutex_exit(&dd->dd_lock);
+		}
 
 		/* Make sure that we clean up dd_space_to* */
 		dsl_dir_dirty(dd, tx);
 
 		dd = dd->dd_parent;
-		space = parent_space;
-	} while (space && dd);
+	} while (dd);
 }
 
 /* call from syncing context when we actually write/free space for this dd */
@@ -1543,7 +1544,8 @@ dsl_dir_diduse_space(dsl_dir_t *dd, dd_used_t type,
 	ASSERT(dmu_tx_is_syncing(tx));
 	ASSERT(type < DD_USED_NUM);
 
-	dmu_buf_will_dirty(dd->dd_dbuf, tx);
+	/* dd_dbuf is pre-dirtied in dsl_pool_sync(). */
+	ASSERT(dmu_buf_is_dirty(dd->dd_dbuf, tx));
 
 	/*
 	 * dsl_dataset_set_refreservation_sync_impl() calls this with
@@ -1601,7 +1603,8 @@ dsl_dir_transfer_space(dsl_dir_t *dd, int64_t delta,
 	    !(ddp->dd_flags & DD_FLAG_USED_BREAKDOWN))
 		return;
 
-	dmu_buf_will_dirty(dd->dd_dbuf, tx);
+	/* dd_dbuf is pre-dirtied in dsl_pool_sync(). */
+	ASSERT(dmu_buf_is_dirty(dd->dd_dbuf, tx));
 	mutex_enter(&dd->dd_lock);
 	ASSERT(delta > 0 ?
 	    ddp->dd_used_breakdown[oldtype] >= delta :
@@ -1623,7 +1626,8 @@ dsl_dir_diduse_transfer_space(dsl_dir_t *dd, int64_t used,
 	ASSERT(oldtype < DD_USED_NUM);
 	ASSERT(newtype < DD_USED_NUM);
 
-	dmu_buf_will_dirty(dd->dd_dbuf, tx);
+	/* dd_dbuf is pre-dirtied in dsl_pool_sync(). */
+	ASSERT(dmu_buf_is_dirty(dd->dd_dbuf, tx));
 
 	mutex_enter(&dd->dd_lock);
 	dsl_dir_phys_t *ddp = dsl_dir_phys(dd);

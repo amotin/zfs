@@ -706,6 +706,14 @@ dsl_pool_sync(dsl_pool_t *dp, uint64_t txg)
 	}
 
 	/*
+	 * Pre-dirty all dsl_dir buffers before dataset sync. This eliminates
+	 * redundant dmu_buf_will_dirty() calls in space accounting functions.
+	 */
+	for (dd = txg_list_head(&dp->dp_dirty_dirs, txg); dd != NULL;
+	    dd = txg_list_next(&dp->dp_dirty_dirs, dd, txg))
+		dmu_buf_will_dirty(dd->dd_dbuf, tx);
+
+	/*
 	 * Write out all dirty blocks of dirty datasets. Note, this could
 	 * create a very large (+10k) zio tree.
 	 */
@@ -805,6 +813,15 @@ dsl_pool_sync(dsl_pool_t *dp, uint64_t txg)
 	 */
 	if (dp->dp_mos_used_delta != 0 || dp->dp_mos_compressed_delta != 0 ||
 	    dp->dp_mos_uncompressed_delta != 0) {
+		/*
+		 * Pre-dirty the MOS dir and root dir buffers before updating
+		 * accounting. dsl_dir_diduse_space() recursively updates
+		 * dp_mos_dir and its parent (dp_root_dir). The root dir is
+		 * usually pre-dirtied when datasets sync, but in a MOS-only
+		 * sync it may not be on dp_dirty_dirs.
+		 */
+		dmu_buf_will_dirty(dp->dp_mos_dir->dd_dbuf, tx);
+		dmu_buf_will_dirty(dp->dp_root_dir->dd_dbuf, tx);
 		dsl_dir_diduse_space(dp->dp_mos_dir, DD_USED_HEAD,
 		    dp->dp_mos_used_delta,
 		    dp->dp_mos_compressed_delta,
