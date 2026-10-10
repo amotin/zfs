@@ -2784,6 +2784,7 @@ arc_buf_alloc_impl(arc_buf_hdr_t *hdr, spa_t *spa, const zbookmark_phys_t *zb,
 	buf = *ret = kmem_cache_alloc(buf_cache, KM_PUSHPAGE);
 	buf->b_hdr = hdr;
 	buf->b_data = NULL;
+	buf->b_abd = NULL;
 	buf->b_next = hdr->b_l1hdr.b_buf;
 	buf->b_flags = 0;
 
@@ -2827,17 +2828,12 @@ arc_buf_alloc_impl(arc_buf_hdr_t *hdr, spa_t *spa, const zbookmark_phys_t *zb,
 	 * an arc_write() then the hdr's data buffer will be released when the
 	 * write completes, even though the L2ARC write might still be using it.
 	 * Second, the hdr's ABD must be linear so that the buf's user doesn't
-	 * need to be ABD-aware.  It must be allocated via
-	 * zio_[data_]buf_alloc(), not as a page, because we need to be able
-	 * to abd_release_ownership_of_buf(), which isn't allowed on "linear
-	 * page" buffers because the ABD code needs to handle freeing them
-	 * specially.
+	 * need to be ABD-aware.
 	 */
 	boolean_t can_share = arc_can_share(hdr, buf) &&
 	    !HDR_L2_WRITING(hdr) &&
 	    hdr->b_l1hdr.b_pabd != NULL &&
-	    abd_is_linear(hdr->b_l1hdr.b_pabd) &&
-	    !abd_is_linear_page(hdr->b_l1hdr.b_pabd);
+	    abd_is_linear(hdr->b_l1hdr.b_pabd);
 
 	/* Set up b_data and sharing */
 	if (can_share) {
@@ -3020,9 +3016,21 @@ arc_share_buf(arc_buf_hdr_t *hdr, arc_buf_t *buf)
 	zfs_refcount_transfer_ownership_many(
 	    &hdr->b_l1hdr.b_state->arcs_size[arc_buf_type(hdr)],
 	    arc_hdr_size(hdr), buf, hdr);
-	hdr->b_l1hdr.b_pabd = abd_get_from_buf(buf->b_data, arc_buf_size(buf));
-	abd_take_ownership_of_buf(hdr->b_l1hdr.b_pabd,
-	    HDR_ISTYPE_METADATA(hdr));
+	if (buf->b_abd != NULL) {
+		/*
+		 * The buf owns a page ABD.  Wrapping it with abd_get_from_buf()
+		 * would claim zio_buf ownership of page memory, so move the
+		 * ABD itself to the hdr instead.
+		 */
+		ASSERT3P(abd_to_buf(buf->b_abd), ==, buf->b_data);
+		hdr->b_l1hdr.b_pabd = buf->b_abd;
+		buf->b_abd = NULL;
+	} else {
+		hdr->b_l1hdr.b_pabd = abd_get_from_buf(buf->b_data,
+		    arc_buf_size(buf));
+		abd_take_ownership_of_buf(hdr->b_l1hdr.b_pabd,
+		    HDR_ISTYPE_METADATA(hdr));
+	}
 	arc_hdr_set_flags(hdr, ARC_FLAG_SHARED_DATA);
 	buf->b_flags |= ARC_BUF_FLAG_SHARED;
 
@@ -3051,8 +3059,18 @@ arc_unshare_buf(arc_buf_hdr_t *hdr, arc_buf_t *buf)
 	    &hdr->b_l1hdr.b_state->arcs_size[arc_buf_type(hdr)],
 	    arc_hdr_size(hdr), hdr, buf);
 	arc_hdr_clear_flags(hdr, ARC_FLAG_SHARED_DATA);
-	abd_release_ownership_of_buf(hdr->b_l1hdr.b_pabd);
-	abd_free(hdr->b_l1hdr.b_pabd);
+	if (abd_is_linear_page(hdr->b_l1hdr.b_pabd)) {
+		/*
+		 * A page ABD has no separable buffer to hand back, so move the
+		 * ABD itself to the buf.  Either way b_data is unchanged, as
+		 * required since db_data is read without holding db_mtx.
+		 */
+		ASSERT3P(abd_to_buf(hdr->b_l1hdr.b_pabd), ==, buf->b_data);
+		buf->b_abd = hdr->b_l1hdr.b_pabd;
+	} else {
+		abd_release_ownership_of_buf(hdr->b_l1hdr.b_pabd);
+		abd_free(hdr->b_l1hdr.b_pabd);
+	}
 	hdr->b_l1hdr.b_pabd = NULL;
 	buf->b_flags &= ~ARC_BUF_FLAG_SHARED;
 
@@ -3130,6 +3148,13 @@ arc_buf_destroy_impl(arc_buf_t *buf)
 
 		if (ARC_BUF_SHARED(buf)) {
 			arc_hdr_clear_flags(hdr, ARC_FLAG_SHARED_DATA);
+		} else if (buf->b_abd != NULL) {
+			/* The buf owns a page ABD, free it as such. */
+			ASSERT(!arc_buf_is_shared(buf));
+			uint64_t size = arc_buf_size(buf);
+			arc_free_data_abd(hdr, buf->b_abd, size, buf);
+			buf->b_abd = NULL;
+			ARCSTAT_INCR(arcstat_overhead_size, -size);
 		} else {
 			ASSERT(!arc_buf_is_shared(buf));
 			uint64_t size = arc_buf_size(buf);

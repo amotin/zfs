@@ -26,6 +26,7 @@
 extern "C" {
 #endif
 
+#include <sys/abd.h>
 #include <sys/zio.h>
 #include <sys/dmu.h>
 #include <sys/spa.h>
@@ -192,6 +193,13 @@ struct arc_buf {
 	arc_buf_hdr_t		*b_hdr;
 	arc_buf_t		*b_next;
 	void			*b_data;
+	/*
+	 * If not NULL, the buf owns this "linear page" ABD and b_data is its
+	 * abd_to_buf().  Page memory does not come from zio_[data_]buf_alloc(),
+	 * so it must be freed with abd_free().  NULL while the ABD is instead
+	 * owned by the hdr as b_pabd, shared with this buf.
+	 */
+	abd_t			*b_abd;
 	arc_buf_flags_t		b_flags;
 };
 
